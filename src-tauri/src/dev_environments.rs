@@ -450,8 +450,8 @@ pub fn launch_dev_environment(
     file: Option<LaunchFile>,
     host_id: Option<String>,
 ) -> Result<(), AbundioError> {
-    // A Host's folder opens over SSH, the way Abundio reaches it; a Host
-    // reached without SSH is this computer (tests, development).
+    // A Host's folder opens over SSH, the way Abundio reaches it. Docker
+    // folders are container paths and cannot be passed to a local IDE.
     let remote = match host_id {
         None => None,
         Some(id) => {
@@ -461,6 +461,9 @@ pub fn launch_dev_environment(
                 .ok_or_else(|| AbundioError::NotFound(format!("host '{id}'")))?;
             match host.target {
                 crate::host_router::HostTarget::Ssh { destination } => Some(destination),
+                crate::host_router::HostTarget::Docker { .. } => {
+                    return Err(AbundioError::InvalidOperation("A Docker Host's folder cannot be opened in a local IDE.".into()));
+                }
                 crate::host_router::HostTarget::Direct { .. } => None,
             }
         }

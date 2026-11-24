@@ -38,19 +38,19 @@ const WORKING_LABELS: Record<string, string> = {
 };
 
 /**
- * Settings ▸ Hosts (docs/plans/remote-hosts.md phase 7d): the machines an
- * Abundio server runs on, reached with the user's own `ssh`. Adding one
- * only remembers how to reach it; File ▸ Open Remote Profile… connects.
- * Check, then Install / Start, sets a Host up (phase 8).
+ * Settings ▸ Hosts (docs/plans/remote-hosts.md phase 7d): machines reached
+ * with the user's own `ssh`, and locally managed Docker containers. Check,
+ * then Install / Start, sets a Host up (phase 8).
  */
 export function HostsSection() {
 	const [hosts, setHosts] = useState<HostEntry[]>([]);
 	const [name, setName] = useState("");
 	const [destination, setDestination] = useState("");
+	const [hostKind, setHostKind] = useState<"ssh" | "docker">("ssh");
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 	/** Each Host's last check, or why it failed: remembered, so the list
-	 *  shows each Host's state when Settings opens, without an ssh. */
+	 *  shows each Host's state when Settings opens, without reconnecting. */
 	const [checks, setChecks] = useState<
 		Record<string, HostCheck | { error: string } | "checking">
 	>(() => loadRemembered().results);
@@ -192,10 +192,13 @@ export function HostsSection() {
 		setBusy(true);
 		setError(null);
 		try {
-			const added = await hostsApi.add(name.trim() || destination.trim(), {
-				kind: "ssh",
-				destination: destination.trim(),
-			});
+			const target =
+				hostKind === "ssh"
+					? ({ kind: "ssh", destination: destination.trim() } as const)
+					: ({ kind: "docker" } as const);
+			const defaultName =
+				hostKind === "ssh" ? destination.trim() : "Docker Host";
+			const added = await hostsApi.add(name.trim() || defaultName, target);
 			setName("");
 			setDestination("");
 			setAdding(false);
@@ -248,7 +251,7 @@ export function HostsSection() {
 			{confirmUninstall && (
 				<ConfirmDialog
 					title={`Uninstall the server from ${confirmUninstall.name}?`}
-					message={uninstallMessage()}
+					message={uninstallMessage(confirmUninstall.target.kind === "docker")}
 					confirmLabel="Uninstall"
 					confirmVariant="danger"
 					onConfirm={() => void uninstall(confirmUninstall)}
@@ -265,15 +268,15 @@ export function HostsSection() {
 					}}
 				>
 					A Host runs an Abundio server, so its Agents keep working while this
-					computer sleeps. Abundio reaches it with your own ssh: keys,
-					~/.ssh/config, jump hosts. Check shows what the Host needs, and
-					Install puts the server in ~/.abundio-server there, no root needed.
-					Then use File ▸ Open Remote Profile….
+					computer sleeps. Reach a machine with your own ssh, or create a Linux
+					Docker container here. Docker Hosts keep their Home and Workspaces in
+					a persistent volume. Check shows what the Host needs; then use File ▸
+					Open Remote Profile….
 				</p>
 				{hosts.length === 0 ? (
 					<div style={{ fontSize: 12, color: "var(--fg-secondary)" }}>
-						No Hosts yet. Add a machine you reach with ssh, and Abundio sets it
-						up to run your Agents.
+						No Hosts yet. Add a machine you reach with ssh, or create a Docker
+						container to run your Agents.
 					</div>
 				) : (
 					<div
@@ -320,7 +323,9 @@ export function HostsSection() {
 										>
 											{h.target.kind === "ssh"
 												? `ssh ${h.target.destination}`
-												: h.target.server}
+												: h.target.kind === "docker"
+													? `Docker container ${h.target.container}`
+													: h.target.server}
 										</span>
 										<div style={{ marginTop: 6 }}>
 											<HostStatus
@@ -362,6 +367,8 @@ export function HostsSection() {
 										<span>
 											Remove {h.name} from this list only, or also uninstall the
 											server from the Host?
+											{h.target.kind === "docker" &&
+												" The Docker container and its data volume stay in Docker."}
 										</span>
 										<div className="flex gap-2">
 											<button
@@ -421,19 +428,72 @@ export function HostsSection() {
 					<>
 						<SectionLabel>Add a Host</SectionLabel>
 						<div className="flex flex-col gap-2" style={{ maxWidth: 420 }}>
+							<fieldset
+								className="flex flex-col gap-2"
+								style={{ border: 0, minWidth: 0, padding: 0 }}
+							>
+								<legend style={{ fontSize: 12, color: "var(--fg-secondary)" }}>
+									Host type
+								</legend>
+								<div className="flex gap-2">
+									<button
+										type="button"
+										className={`${hostKind === "ssh" ? primaryButtonClass : secondaryButtonClass} rounded-md`}
+										style={{
+											fontSize: 12,
+											height: 30,
+											padding: "0 12px",
+											...(hostKind === "ssh"
+												? { color: "white", backgroundColor: "var(--accent)" }
+												: {}),
+										}}
+										aria-pressed={hostKind === "ssh"}
+										onClick={() => setHostKind("ssh")}
+									>
+										SSH machine
+									</button>
+									<button
+										type="button"
+										className={`${hostKind === "docker" ? primaryButtonClass : secondaryButtonClass} rounded-md`}
+										style={{
+											fontSize: 12,
+											height: 30,
+											padding: "0 12px",
+											...(hostKind === "docker"
+												? { color: "white", backgroundColor: "var(--accent)" }
+												: {}),
+										}}
+										aria-pressed={hostKind === "docker"}
+										onClick={() => setHostKind("docker")}
+									>
+										Docker container
+									</button>
+								</div>
+							</fieldset>
+							{hostKind === "ssh" ? (
+								<input
+									className="rounded-md"
+									style={paramTextInputStyle}
+									placeholder="ssh destination: an alias from ~/.ssh/config, or user@host"
+									value={destination}
+									onChange={(e) => setDestination(e.target.value)}
+									spellCheck={false}
+									autoCapitalize="off"
+								/>
+							) : (
+								<p style={{ fontSize: 12, color: "var(--fg-secondary)" }}>
+									Creates a node:22-bookworm container with a persistent Home
+									volume. Docker must be installed and running.
+								</p>
+							)}
 							<input
 								className="rounded-md"
 								style={paramTextInputStyle}
-								placeholder="ssh destination: an alias from ~/.ssh/config, or user@host"
-								value={destination}
-								onChange={(e) => setDestination(e.target.value)}
-								spellCheck={false}
-								autoCapitalize="off"
-							/>
-							<input
-								className="rounded-md"
-								style={paramTextInputStyle}
-								placeholder="Name (optional; the destination by default)"
+								placeholder={
+									hostKind === "ssh"
+										? "Name (optional; the destination by default)"
+										: "Name (optional; defaults to Docker Host)"
+								}
 								value={name}
 								onChange={(e) => setName(e.target.value)}
 							/>
@@ -452,12 +512,21 @@ export function HostsSection() {
 										padding: "0 14px",
 										color: "white",
 										backgroundColor: "var(--accent)",
-										opacity: destination.trim() && !busy ? 1 : 0.5,
+										opacity:
+											(hostKind === "docker" || destination.trim()) && !busy
+												? 1
+												: 0.5,
 									}}
-									disabled={!destination.trim() || busy}
+									disabled={(hostKind === "ssh" && !destination.trim()) || busy}
 									onClick={() => void add()}
 								>
-									Add and check
+									{busy
+										? hostKind === "docker"
+											? "Creating Docker Host…"
+											: "Adding…"
+										: hostKind === "docker"
+											? "Create and check"
+											: "Add and check"}
 								</button>
 								{hosts.length > 0 && (
 									<button

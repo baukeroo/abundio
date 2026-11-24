@@ -73,4 +73,19 @@ describe("OpenRemoteProfileDialog", () => {
 		expect(api.openRemoteProfile).not.toHaveBeenCalled();
 		expect(document.body.textContent).toContain("Work");
 	});
+
+	it("identifies a Docker Host by its container name", async () => {
+		act(() => root.unmount());
+		api.list.mockResolvedValue([
+			{
+				id: "container",
+				name: "Local Docker",
+				target: { kind: "docker", container: "abundio-host-test" },
+			},
+		]);
+		root = createRoot(container);
+		act(() => root.render(<OpenRemoteProfileDialog onClose={onClose} />));
+		await flush();
+		expect(document.body.textContent).toContain("Docker · abundio-host-test");
+	});
 });

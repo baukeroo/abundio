@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { panesEndedBy, restartMessage } from "../hostSetup";
+import { panesEndedBy, restartMessage, uninstallMessage } from "../hostSetup";
 import type { HostCheck } from "../ipc";
 
 const check = (running: boolean, panes: number | null): HostCheck => ({
@@ -48,6 +48,15 @@ describe("removing the service (all platforms)", () => {
 		expect(restartMessage("unservice", "box", 2)).toContain(
 			"Removing the service restarts the server without it",
 		);
+	});
+});
+
+describe("uninstallMessage", () => {
+	it("makes clear that a Docker Host's container and volume are retained", () => {
+		const message = uninstallMessage(true);
+		expect(message).toContain("Docker container");
+		expect(message).toContain("persistent Home volume");
+		expect(message).toContain("project folders remain");
 	});
 });
 

@@ -1,6 +1,6 @@
 //! Host setup's commands (docs/plans/remote-hosts.md phase 8): Settings ▸
 //! Hosts asks what a Host has (`host_check`), and installs, starts, updates
-//! or removes the server there. Each is a short `ssh` of its own; SSH
+//! or removes the server there. Each uses one short Host command; SSH
 //! prompts show in the Window that asked.
 
 use std::time::Duration;
@@ -41,13 +41,14 @@ pub async fn host_check(
         let mut words: Vec<&str> = agents.iter().filter_map(|a| host_setup::probe_word(a)).collect();
         words.sort_unstable();
         words.dedup();
+        host.target.ensure_ready().map_err(AbundioError::Channel)?;
         let out = crate::remote_windows::with_ssh_mode(&app, &host.name, Some(&label), |mode| {
             host_setup::run_script(host.target.shell(mode, &words), host_setup::PROBE_SCRIPT, STEP_LIMIT)
         })
         .map_err(AbundioError::Channel)?;
         let probe = host_setup::parse_probe(&out);
         let app_version = env!("CARGO_PKG_VERSION");
-        let mut items = host_setup::checklist(&probe, app_version);
+        let mut items = checklist_for_target(&host.target, &probe, app_version);
         if cfg!(debug_assertions) {
             if let Some(sha) = dev_build_sha(&probe) {
                 host_setup::mark_rebuilt_server(&mut items, &probe, app_version, &sha);
@@ -57,6 +58,14 @@ pub async fn host_check(
     })
     .await
     .map_err(|e| AbundioError::InvalidOperation(e.to_string()))?
+}
+
+fn checklist_for_target(target: &crate::host_router::HostTarget, probe: &Probe, version: &str) -> Vec<CheckItem> {
+    if target.is_docker() {
+        host_setup::checklist_for_docker(probe, version)
+    } else {
+        host_setup::checklist(probe, version)
+    }
 }
 
 /// The SHA-256 of the server a development build would install on this
@@ -76,8 +85,8 @@ pub const PROGRESS_EVENT: &str = "host-setup-progress";
 
 /// Install this app's server on a Host (phase 8b): the binary for the
 /// platform its last Check found (`os`, `arch`; the Host refuses it if that
-/// changed), uploaded in the same ssh that installs it and checks again, so
-/// a Host that asks for a password asks once. Answers with the new
+/// changed), uploaded in the same Host command that installs it and checks
+/// again, so a Host that asks for a password asks once. Answers with the new
 /// checklist.
 #[tauri::command]
 pub async fn host_install(
@@ -97,6 +106,7 @@ pub async fn host_install(
             let _ = app.emit_to(label.as_str(), PROGRESS_EVENT, serde_json::json!({ "hostId": host_id, "text": text }));
         };
         let platform = host_setup::platform(&os, &arch).map_err(AbundioError::InvalidOperation)?;
+        host.target.ensure_ready().map_err(AbundioError::Channel)?;
         // The app's own server (phase 15), gzipped unless the Host lacks gzip.
         let server = crate::server_binary::locate(&app, platform, gzip.unwrap_or(true))
             .map_err(AbundioError::InvalidOperation)?;
@@ -125,15 +135,15 @@ pub async fn host_install(
         log::info!("[host] installed server {version} on {}", host.name);
         // Windows waiting on this Host (another server version) connect again.
         let _ = app.emit(SERVER_READY_EVENT, &host_id);
-        Ok(HostCheck { items: host_setup::checklist(&probe, version), probe, app_version: version })
+        Ok(HostCheck { items: checklist_for_target(&host.target, &probe, version), probe, app_version: version })
     })
     .await
     .map_err(|e| AbundioError::InvalidOperation(e.to_string()))?
 }
 
 /// Start the installed server on a Host as a service (phase 8c), then check
-/// again, in one ssh. `restart`: stop the one running first (phase 8d: to
-/// move a server running by itself into a service). Answers with the new
+/// again, in one Host command. `restart`: stop the one running first (phase
+/// 8d: to move a server running by itself into a service). Answers with the new
 /// checklist.
 #[tauri::command]
 pub async fn host_start(
@@ -156,6 +166,7 @@ pub async fn host_start(
         let mut words: Vec<&str> = agents.iter().filter_map(|a| host_setup::probe_word(a)).collect();
         words.sort_unstable();
         words.dedup();
+        host.target.ensure_ready().map_err(AbundioError::Channel)?;
         let out = crate::remote_windows::with_ssh_mode(&app, &host.name, Some(&label), |mode| {
             host_setup::run_script(
                 host.target.sh_c(mode, &script, &words),
@@ -174,7 +185,7 @@ pub async fn host_start(
             let _ = app.emit(SERVER_READY_EVENT, &host_id);
         }
         let app_version = env!("CARGO_PKG_VERSION");
-        Ok(HostCheck { items: host_setup::checklist(&probe, app_version), probe, app_version })
+        Ok(HostCheck { items: checklist_for_target(&host.target, &probe, app_version), probe, app_version })
     })
     .await
     .map_err(|e| AbundioError::InvalidOperation(e.to_string()))?
@@ -188,6 +199,7 @@ pub async fn host_uninstall(app: AppHandle, window: Window, host_id: String) -> 
     let host = crate::hosts::find(&host_id).ok_or_else(|| AbundioError::NotFound("that Host was removed".into()))?;
     let label = window.label().to_string();
     tauri::async_runtime::spawn_blocking(move || {
+        host.target.ensure_ready().map_err(AbundioError::Channel)?;
         let out = crate::remote_windows::with_ssh_mode(&app, &host.name, Some(&label), |mode| {
             host_setup::run_script(host.target.sh_c(mode, &host_setup::uninstall(), &[]), "", STEP_LIMIT)
         })

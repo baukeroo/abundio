@@ -1,6 +1,6 @@
 //! Setting up a Host (docs/plans/remote-hosts.md phase 8, "Host setup"):
 //! what the app learns about a Host before it installs anything (the
-//! **probe**, one short `ssh <host> sh -s` with this script on its stdin),
+//! **probe**, one short Host command with this script on its stdin),
 //! and the **checklist** it shows from that: a ✓ or a fix per line.
 //!
 //! The probe changes nothing on the Host. Everything it says comes back as
@@ -256,13 +256,13 @@ rm -rf "$HOME/.abundio-server"
 printf 'ABUNDIO removed=yes\n'
 "#;
 
-/// Install, stop whatever server runs, start the new one, then probe, in
-/// one ssh (one password prompt).
+/// Install, stop whatever server runs, start the new one, then probe in one
+/// Host command (one password prompt for an SSH Host).
 pub fn install_then_probe() -> String {
     format!("{INSTALL_SCRIPT}\n{STOP_SCRIPT}\n{START_SCRIPT}\nset +eu\n{PROBE_SCRIPT}")
 }
 
-/// Start (or, with `restart`, stop and start), then probe, in one ssh.
+/// Start (or, with `restart`, stop and start), then probe in one Host command.
 /// Its arguments: the Agents to look for.
 pub fn start_then_probe(restart: bool) -> String {
     let stop = if restart { STOP_SCRIPT } else { "" };
@@ -271,7 +271,7 @@ pub fn start_then_probe(restart: bool) -> String {
 
 /// Take the service Abundio set up away (systemd `--user` unit or a Mac's
 /// LaunchAgent), then run the server detached, so the Host keeps working
-/// until it reboots; then probe, in one ssh.
+/// until it reboots; then probe in one Host command.
 pub fn remove_service_then_probe() -> String {
     format!("set -eu\n{STOP_SCRIPT}\n{REMOVE_SERVICE_SCRIPT}\nABUNDIO_SETUP_SERVICE=detached\n{START_SCRIPT}\nset +eu\n{PROBE_SCRIPT}")
 }
@@ -287,7 +287,7 @@ fi
 rm -f "$agent"
 "#;
 
-/// Stop the server and remove it, in one ssh.
+/// Stop the server and remove it in one Host command.
 pub fn uninstall() -> String {
     format!("set -eu\n{STOP_SCRIPT}\n{UNINSTALL_SCRIPT}")
 }
@@ -433,6 +433,15 @@ impl CheckItem {
 
 /// The checklist for a Host this app (`version`) would use.
 pub fn checklist(p: &Probe, version: &str) -> Vec<CheckItem> {
+    checklist_inner(p, version, false)
+}
+
+/// The checklist for an Abundio-managed Docker Host.
+pub fn checklist_for_docker(p: &Probe, version: &str) -> Vec<CheckItem> {
+    checklist_inner(p, version, true)
+}
+
+fn checklist_inner(p: &Probe, version: &str, docker_host: bool) -> Vec<CheckItem> {
     let mut out = Vec::new();
     if !p.complete {
         out.push(
@@ -474,7 +483,11 @@ pub fn checklist(p: &Probe, version: &str) -> Vec<CheckItem> {
                 .action("start")
         });
     }
-    out.push(reboot_item(p, installed));
+    out.push(if docker_host {
+        item("reboot", "ok", "Docker restarts this container; Abundio starts the server when it reconnects")
+    } else {
+        reboot_item(p, installed)
+    });
     out.push(if p.agents.is_empty() {
         item("agents", "warn", "No Agents found").fix(if p.shell_answered {
             "Install one on the Host, then Check again."
@@ -661,6 +674,18 @@ mod tests {
         let list = checklist(&odd, "3.1.0");
         assert_eq!(list.iter().find(|i| i.id == "platform").unwrap().state, "error");
         assert_eq!(list.iter().find(|i| i.id == "server").unwrap().action, None);
+    }
+
+    #[test]
+    fn a_docker_host_uses_the_container_restart_policy_for_its_reboot_line() {
+        let p = parse_probe(LINUX);
+        let reboot = checklist_for_docker(&p, "3.1.0")
+            .into_iter()
+            .find(|i| i.id == "reboot")
+            .unwrap();
+        assert_eq!(reboot.state, "ok");
+        assert_eq!(reboot.action, None);
+        assert!(reboot.label.contains("Docker restarts this container"));
     }
 
     /// Phase 13: a Mac's server runs as a LaunchAgent Abundio sets up, which

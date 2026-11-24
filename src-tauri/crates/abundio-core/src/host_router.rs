@@ -43,6 +43,12 @@ pub enum HostTarget {
     /// path saved by an older build (`server`) is read and ignored, since
     /// connecting anywhere else would reach a server setup never updates.
     Ssh { destination: String },
+    /// An Abundio-managed Docker container on this computer.
+    Docker {
+        /// Assigned by the desktop when the Host is added.
+        #[serde(default)]
+        container: String,
+    },
     /// An `abundio-server` on this computer, reached without SSH (tests and
     /// development).
     Direct { server: String, data_dir: Option<String> },
@@ -60,6 +66,34 @@ pub enum ConnectMode {
 }
 
 impl HostTarget {
+    /// Start a stopped Docker Host before probing or connecting to it.
+    pub fn ensure_ready(&self) -> Result<(), String> {
+        let Self::Docker { container } = self else {
+            return Ok(());
+        };
+        if !valid_docker_container_name(container) {
+            return Err("the Docker Host has an invalid container name".into());
+        }
+
+        if docker_container_running(container)? {
+            return Ok(());
+        }
+        let mut start = Command::new("docker");
+        start.args(["start", container]);
+        match crate::host_setup::run(start, Box::new(std::io::empty()), Duration::from_secs(60)) {
+            Ok(_) => Ok(()),
+            Err(start_error) => match docker_container_running(container) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(start_error),
+                Err(check_error) => Err(format!("{start_error}; could not recheck the container: {check_error}")),
+            },
+        }
+    }
+
+    pub fn is_docker(&self) -> bool {
+        matches!(self, Self::Docker { .. })
+    }
+
     /// The program that carries the connection.
     pub fn command(&self, mode: &ConnectMode) -> Command {
         match self {
@@ -79,13 +113,18 @@ impl HostTarget {
                 }
                 c
             }
+            HostTarget::Docker { container } => {
+                let mut c = Command::new("docker");
+                c.args(["exec", "-i", container, "sh", "-c", DOCKER_CONNECT_SCRIPT, "abundio-connect"]);
+                c
+            }
         }
     }
 
     /// `sh -s` on the Host, a script on its stdin and `words` as its
     /// arguments (Host setup). The words reach the Host's shell, so each
-    /// must be a plain word (`host_setup::probe_word`). A `Direct` Host runs
-    /// it on this computer.
+    /// must be a plain word (`host_setup::probe_word`). A Docker Host runs
+    /// it through `docker exec`; a `Direct` Host runs it on this computer.
     pub fn shell(&self, mode: &ConnectMode, words: &[&str]) -> Command {
         debug_assert!(words.iter().all(|w| crate::host_setup::probe_word(w) == Some(*w)));
         let mut c = match self {
@@ -99,6 +138,11 @@ impl HostTarget {
                 c.args(["-s", "--"]);
                 c
             }
+            HostTarget::Docker { container } => {
+                let mut c = Command::new("docker");
+                c.args(["exec", "-i", container, "sh", "-s", "--"]);
+                c
+            }
         };
         c.args(words);
         c
@@ -109,7 +153,7 @@ impl HostTarget {
     /// `sh -c <script> abundio-setup <args…>` on the Host, with whatever
     /// the caller writes on its stdin (Host setup's install: the binary).
     /// Over ssh the Host's login shell reads the command line, so the script
-    /// and every argument are quoted.
+    /// and every argument are quoted; Docker passes them as separate args.
     pub fn sh_c(&self, mode: &ConnectMode, script: &str, args: &[&str]) -> Command {
         match self {
             HostTarget::Ssh { destination } => {
@@ -127,7 +171,56 @@ impl HostTarget {
                 c.args(["-c", script, "abundio-setup"]).args(args);
                 c
             }
+            HostTarget::Docker { container } => {
+                let mut c = Command::new("docker");
+                c.args(["exec", "-i", container, "sh", "-c", script, "abundio-setup"])
+                    .args(args);
+                c
+            }
         }
+    }
+}
+
+/// Starts the installed server after a container restart, then hands the
+/// binary protocol through `docker exec` without allocating a TTY.
+const DOCKER_CONNECT_SCRIPT: &str = r#"
+d="$HOME/.abundio-server"
+srv="$d/current"
+[ -x "$srv" ] || { echo "The Abundio server is not installed: $srv" >&2; exit 127; }
+if ! "$srv" connect </dev/null >/dev/null 2>&1; then
+  mkdir -p "$d/data"
+  chmod 700 "$d/data"
+  log="$d/server.log"
+  nohup "$srv" run >>"$log" 2>&1 </dev/null &
+  i=0
+  until "$srv" connect </dev/null >/dev/null 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -ge 30 ]; then
+      echo "the Abundio server did not start in the Docker Host" >&2
+      tail -n 3 "$log" >&2 2>/dev/null || true
+      exit 1
+    fi
+    sleep 1
+  done
+fi
+exec "$srv" connect
+"#;
+
+fn valid_docker_container_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    matches!(bytes.next(), Some(b) if b.is_ascii_alphanumeric())
+        && name.len() <= 63
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+fn docker_container_running(container: &str) -> Result<bool, String> {
+    let mut inspect = Command::new("docker");
+    inspect.args(["inspect", "--format={{.State.Running}}", container]);
+    let state = crate::host_setup::run(inspect, Box::new(std::io::empty()), Duration::from_secs(30))?;
+    match state.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(format!("Docker returned an unexpected container state: {other}")),
     }
 }
 
@@ -429,6 +522,7 @@ impl HostRouter {
             s.generation += 1;
             s.generation
         };
+        target.ensure_ready().map_err(|e| explain_connect_failure(&e))?;
         let listener = Arc::new(Listener { host: host.to_string(), router: self.me.clone(), generation });
         let (client, process) =
             HostProcess::spawn(target.command(mode), listener).map_err(|e| explain_connect_failure(&e))?;
@@ -720,6 +814,35 @@ mod tests {
     }
 
     #[test]
+    fn a_docker_host_uses_exec_for_its_protocol_and_setup_scripts() {
+        let t = HostTarget::Docker { container: "abundio-host-123".into() };
+        let connect = t.command(&ConnectMode::Batch);
+        assert_eq!(connect.get_program(), "docker");
+        let args: Vec<_> = connect.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(&args[..4], ["exec", "-i", "abundio-host-123", "sh"]);
+        assert_eq!(&args[4..7], ["-c", DOCKER_CONNECT_SCRIPT, "abundio-connect"]);
+        assert!(DOCKER_CONNECT_SCRIPT.contains("nohup \"$srv\" run"));
+        assert!(DOCKER_CONNECT_SCRIPT.contains("exec \"$srv\" connect"));
+
+        let shell = t.shell(&ConnectMode::Batch, &["claude"]);
+        let args: Vec<_> = shell.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(&args, ["exec", "-i", "abundio-host-123", "sh", "-s", "--", "claude"]);
+
+        let setup = t.sh_c(&ConnectMode::Batch, "echo \"$1\"", &["value"]);
+        let args: Vec<_> = setup.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(&args, ["exec", "-i", "abundio-host-123", "sh", "-c", "echo \"$1\"", "abundio-setup", "value"]);
+    }
+
+    #[test]
+    fn docker_container_names_cannot_be_options_or_commands() {
+        assert!(valid_docker_container_name("abundio-host-123"));
+        for invalid in ["", "-x", "host;echo", "with spaces", "host/name", "é"] {
+            assert!(!valid_docker_container_name(invalid), "{invalid:?}");
+        }
+        assert!(!valid_docker_container_name(&"a".repeat(64)));
+    }
+
+    #[test]
     fn only_a_failure_the_user_can_fix_stops_the_retries() {
         assert!(needs_sign_in("handshake failed: me@box: Permission denied (publickey,password)."));
         assert!(needs_sign_in("Host key verification failed."));
@@ -737,6 +860,8 @@ mod tests {
         assert_eq!(old, HostTarget::Ssh { destination: "me@box".into() });
         let d: HostTarget = serde_json::from_str(r#"{"kind":"direct","server":"/x/abundio-server","dataDir":"/d"}"#).unwrap();
         assert_eq!(d, HostTarget::Direct { server: "/x/abundio-server".into(), data_dir: Some("/d".into()) });
+        let docker: HostTarget = serde_json::from_str(r#"{"kind":"docker"}"#).unwrap();
+        assert_eq!(docker, HostTarget::Docker { container: String::new() });
     }
 
     struct Nowhere;

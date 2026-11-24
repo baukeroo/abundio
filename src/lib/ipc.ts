@@ -245,6 +245,7 @@ export const agentCommandsApi = {
 /** How the desktop reaches a remote Host (Rust's `host_router::HostTarget`). */
 export type HostTarget =
 	| { kind: "ssh"; destination: string }
+	| { kind: "docker"; container: string }
 	| { kind: "direct"; server: string; dataDir?: string };
 
 /** Remote Hosts (docs/plans/remote-hosts.md phase 7c): connect once per
@@ -326,7 +327,7 @@ export const hostsApi = {
 	bind: (host: string | null) => invoke<void>("host_bind", { host }),
 	/** The Hosts the user added (Settings ▸ Hosts, phase 7d). */
 	list: () => invoke<HostEntry[]>("hosts_list"),
-	add: (name: string, target: HostTarget) =>
+	add: (name: string, target: HostTarget | { kind: "docker" }) =>
 		invoke<HostEntry>("hosts_add", { name, target }),
 	remove: (id: string) => invoke<void>("hosts_remove", { id }),
 	/** Connect to an added Host; resolves with its server's version. */

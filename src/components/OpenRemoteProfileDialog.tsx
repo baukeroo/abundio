@@ -142,8 +142,8 @@ export function OpenRemoteProfileDialog({
 				{hosts !== null && hosts.length === 0 && (
 					<div className="flex flex-col gap-3">
 						<p style={{ fontSize: 13, color: "var(--fg-secondary)" }}>
-							Add a Host first: the ssh alias or user@host of a machine running
-							an Abundio server.
+							Add a Host first: an ssh machine or a Docker container, then set
+							it up in Settings ▸ Hosts.
 						</p>
 						<div>
 							<button
@@ -190,7 +190,11 @@ export function OpenRemoteProfileDialog({
 										fontFamily: "var(--font-mono)",
 									}}
 								>
-									{h.target.kind === "ssh" ? h.target.destination : "local"}
+									{h.target.kind === "ssh"
+										? h.target.destination
+										: h.target.kind === "docker"
+											? `Docker · ${h.target.container}`
+											: "local"}
 								</span>
 							</label>
 						))}

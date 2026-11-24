@@ -29,7 +29,10 @@ export function restartMessage(action: string, host: string, panes: number) {
 }
 
 /** What Uninstall's confirm says. */
-export function uninstallMessage(): string {
+export function uninstallMessage(dockerHost = false): string {
+	if (dockerHost) {
+		return "This stops the server, ending every pane and Agent it runs, and deletes ~/.abundio-server on the Host, and its service if Abundio set one up. The Docker container, its persistent Home volume and project folders remain in Docker.";
+	}
 	return "This stops the server, ending every pane and Agent it runs, and deletes ~/.abundio-server on the Host, and its service if Abundio set one up: the server and its data (the Host's Profiles, Workspaces, layouts and notes). Your project folders there are not touched.";
 }
 
